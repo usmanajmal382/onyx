@@ -8,6 +8,8 @@ from typing import IO, Any
 from onyx.configs.app_configs import INDEX_BATCH_SIZE
 from onyx.configs.constants import DocumentSource, FileOrigin
 from onyx.connectors.cross_connector_utils.miscellaneous_utils import (
+    check_content_hash_exists,
+    compute_document_content_metrics,
     process_onyx_metadata,
 )
 from onyx.connectors.cross_connector_utils.tabular_section_utils import (
@@ -83,6 +85,8 @@ def _process_file(
     pdf_pass: str | None,
     file_type: str | None,
     stage: RawFileCallback | None,
+    db_session: Any | None = None,
+    existing_hashes: set[str] | None = None,
 ) -> list[Document]:
     """
     Process a file and return a list of Documents.
@@ -159,6 +163,33 @@ def _process_file(
         pdf_pass=pdf_pass,
         content_type=file_type,
     )
+
+    # Automatically compute and enrich document content metrics & quality indicators
+    if extraction_result.text_content:
+        content_metrics = compute_document_content_metrics(
+            extraction_result.text_content
+        )
+        content_hash = content_metrics.get("content_hash")
+
+        # Check whether the same hash already exists using existing Onyx storage/index
+        if content_hash and check_content_hash_exists(
+            content_hash=content_hash,
+            db_session=db_session,
+            existing_hashes=existing_hashes,
+        ):
+            logger.info(
+                "Skipping duplicate document content for '%s' (content_hash: %s)",
+                file_name,
+                content_hash,
+            )
+            return []
+
+        # Track hash in session/batch cache and enrich custom_tags
+        if existing_hashes is not None and content_hash:
+            existing_hashes.add(content_hash)
+
+        custom_tags.update(content_metrics)
+
 
     # Each file may have file-specific ONYX_METADATA https://docs.onyx.app/admins/connectors/official/file
     # If so, we should add it to any metadata processed so far
@@ -298,12 +329,15 @@ class LocalFileConnector(LoadConnector):
         zip_metadata_file_id: str | None = None,
         zip_metadata: dict[str, Any] | None = None,  # Deprecated, for backwards compat
         batch_size: int = INDEX_BATCH_SIZE,
+        db_session: Any | None = None,
     ) -> None:
         self.file_locations = [str(loc) for loc in file_locations]
         self.batch_size = batch_size
         self.pdf_pass: str | None = None
         self._zip_metadata_file_id = zip_metadata_file_id
         self._zip_metadata_deprecated = zip_metadata
+        self.db_session = db_session
+        self._seen_content_hashes: set[str] = set()
 
     def load_credentials(self, credentials: dict[str, Any]) -> dict[str, Any] | None:
         self.pdf_pass = credentials.get("pdf_password")
@@ -361,6 +395,8 @@ class LocalFileConnector(LoadConnector):
                 pdf_pass=self.pdf_pass,
                 file_type=file_record.file_type,
                 stage=self.raw_file_callback,
+                db_session=self.db_session,
+                existing_hashes=self._seen_content_hashes,
             )
             documents.extend(new_docs)
 

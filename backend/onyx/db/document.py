@@ -1071,6 +1071,26 @@ def update_docs_content_hash__no_commit(
         doc.content_hash = ids_to_new_hash[doc.id]
 
 
+def check_content_hash_exists(
+    content_hash: str,
+    db_session: Session,
+) -> bool:
+    """Checks whether a document with the specified content_hash already exists in PostgreSQL.
+
+    Checks both the dedicated content_hash column and the doc_metadata JSONB payload
+    for maximum compatibility across ingestion pathways.
+    """
+    stmt = select(
+        exists().where(
+            or_(
+                DbDocument.content_hash == content_hash,
+                DbDocument.doc_metadata["content_hash"].as_string() == content_hash,
+            )
+        )
+    )
+    return bool(db_session.execute(stmt).scalar())
+
+
 def mark_document_as_modified(
     document_id: str,
     db_session: Session,

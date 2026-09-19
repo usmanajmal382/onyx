@@ -67,3 +67,7 @@ plans
 .claude/scheduled_tasks.lock
 .claude/worktrees/
 !.claude/settings.json
+
+# Candidate personal evaluation notes (not for repo push)
+LOOM_WALKTHROUGH_SCRIPT.md
+GOOGLE_FORM_SUBMISSION.md

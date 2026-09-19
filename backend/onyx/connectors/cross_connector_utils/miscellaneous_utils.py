@@ -1,3 +1,5 @@
+import hashlib
+import math
 import re
 from collections.abc import Callable, Iterator
 from datetime import datetime, timezone
@@ -211,3 +213,111 @@ def scoped_url(url: str, product: str) -> str:
     base_url = parsed.scheme + "://" + parsed.netloc
     cloud_id = get_cloudId(base_url)
     return f"https://api.atlassian.com/ex/{product}/{cloud_id}{parsed.path}"
+
+
+def compute_document_content_metrics(
+    text_content: str | None,
+    words_per_minute: int = 200,
+) -> dict[str, str]:
+    """
+    Computes comprehensive structural and content analytics for extracted document text.
+    These metrics enrich document metadata for search relevance, deduplication,
+    and user-facing reading time estimation.
+
+    Args:
+        text_content: The raw text string extracted from the document.
+        words_per_minute: Estimated reading speed for calculating reading time.
+
+    Returns:
+        Dictionary mapping metric names to string-serialized values, suitable for
+        direct injection into Onyx Document metadata / custom_tags.
+    """
+    if not text_content or not text_content.strip():
+        return {}
+
+    cleaned_text = text_content.strip()
+    words = cleaned_text.split()
+    word_count = len(words)
+    if word_count == 0:
+        return {}
+
+    char_count = len(cleaned_text)
+    char_count_no_spaces = sum(len(w) for w in words)
+
+    # Sentence boundary detection using common terminal punctuation
+    sentences = [s.strip() for s in re.split(r"[.!?]+", cleaned_text) if s.strip()]
+    sentence_count = max(1, len(sentences))
+
+    # Paragraph count based on non-empty line segments
+    paragraphs = [p.strip() for p in cleaned_text.splitlines() if p.strip()]
+    paragraph_count = max(1, len(paragraphs))
+
+    # Reading time calculation (standard ~200 WPM, rounded up to nearest minute)
+    reading_time_mins = max(1, math.ceil(word_count / words_per_minute))
+
+    # Deterministic SHA-256 content hash for duplicate detection and document provenance
+    content_hash = hashlib.sha256(cleaned_text.encode("utf-8")).hexdigest()
+
+    # Content complexity indicators
+    unique_words = {w.lower() for w in words}
+    lexical_diversity = f"{len(unique_words) / word_count:.2f}"
+    avg_word_length = f"{char_count_no_spaces / word_count:.1f}"
+
+    return {
+        "word_count": str(word_count),
+        "char_count": str(char_count),
+        "char_count_no_spaces": str(char_count_no_spaces),
+        "sentence_count": str(sentence_count),
+        "paragraph_count": str(paragraph_count),
+        "reading_time_mins": str(reading_time_mins),
+        "content_hash": content_hash,
+        "lexical_diversity": lexical_diversity,
+        "avg_word_length": avg_word_length,
+        "enriched_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def check_content_hash_exists(
+    content_hash: str | None,
+    db_session: Any | None = None,
+    existing_hashes: set[str] | None = None,
+) -> bool:
+    """
+    Checks whether a document with the given content_hash already exists.
+
+    1. Checks fast in-memory / batch existing_hashes set if provided.
+    2. Checks database storage via db_session or current tenant session if available.
+
+    Returns True if content is duplicate, False otherwise.
+    """
+    if not content_hash:
+        return False
+
+    if existing_hashes is not None and content_hash in existing_hashes:
+        return True
+
+    try:
+        if db_session is not None:
+            from onyx.db.document import (
+                check_content_hash_exists as db_check_content_hash,
+            )
+
+            return db_check_content_hash(content_hash, db_session)
+
+        # Attempt resolving through tenant session context if database is configured
+        from onyx.db.engine.sql_engine import get_session_with_current_tenant
+
+        with get_session_with_current_tenant() as session:
+            from onyx.db.document import (
+                check_content_hash_exists as db_check_content_hash,
+            )
+
+            return db_check_content_hash(content_hash, session)
+    except Exception as e:
+        import logging
+
+        logging.getLogger(__name__).debug(
+            "Database content_hash check skipped or unavailable: %s", e
+        )
+        return False
+
